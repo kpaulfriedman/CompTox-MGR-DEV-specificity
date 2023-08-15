@@ -1,0 +1,362 @@
+---
+title: "Specificity of Effects in DEV and MGR"
+author: "Katie Paul Friedman"
+date: "1/6/2023"
+output: 
+  html_document:
+    code_folding: hide
+    collapsed: yes
+    df_print: paged
+    lightbox: no
+    number_sections: yes
+    self_contained: yes
+    thumbnails: no
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+---
+
+```{r setup, warning=FALSE, message=FALSE, echo=FALSE}
+library(broom)
+library(caret)
+library(circlize)
+library(colorRamps)
+library(cowplot)
+library(data.table)
+library(DescTools)
+library(dplyr)
+library(DT)
+library(ggplot2)
+library(gplots)
+library(grid)
+library(httk)
+library(kableExtra)
+library(openxlsx)
+library(plotly)
+library(purrr)
+library(RColorBrewer)
+library(RMySQL)
+library(tidyr)
+library(tcpl)
+library(viridis)
+
+#if(!require("BiocManager", quietly=TRUE))
+#  install.packages("BiocManager")
+#BiocManager::install("ComplexHeatmap")
+library(ComplexHeatmap)
+
+
+```
+
+# Connections and Database Query
+
+* Toxicity Reference Database (ToxRefDB) version 2.1 was released in September 2022.
+* ToxRefDB v2.1 does not contain additional studies; it is a bug-fix release that added some dropped observations in some studies.
+
+```{r, warning=FALSE, eval=FALSE, 'connection-example'}
+con <- dbConnect(drv = RMySQL::MySQL(),
+                 database=res_toxrefdb, # internal research MySQL database naming currently
+                 user="", password="",host="") # user and host connection details omitted
+```
+
+```{r, warning=FALSE, eval=FALSE, echo=FALSE}
+# not shown in knit but available for .Rmd internal users
+con <- dbConnect(drv = RMySQL::MySQL(),
+                 database=prod_toxrefdb_2_1, # internal research MySQL database naming currently
+                 user="_dataminer", password="pass",host="ccte-mysql-res.epa.gov") # user connection details omitted
+```
+
+```{r, warning=FALSE, eval=FALSE, 'db-query'}
+
+toxrefv2_1 <- dbGetQuery(con, "SELECT 
+                       chemical.chemical_id,
+                       chemical.dsstox_substance_id,
+                       chemical.casrn,
+                       chemical.preferred_name,
+                       study.study_id,
+                       study.processed,
+                       study.study_type, 
+                       study.study_year,
+                       study.study_source,
+                       study.species, 
+                       study.strain_group,
+                       study.admin_route,
+                       study.admin_method,
+                       study.substance_purity,
+                       endpoint.endpoint_category,
+                       endpoint.endpoint_type,
+                       endpoint.endpoint_target,
+                       endpoint.endpoint_id,
+                       tg_effect.life_stage,
+                       tg_effect.tg_effect_id,tg_effect.target_site,
+                       effect.effect_id,
+                       effect.effect_desc,
+                       effect.cancer_related,
+                       tg.sex,
+                       tg.generation,
+                       tg.n,
+                       tg.dose_duration,
+                       tg.dose_duration_unit,
+                       dose.vehicle,
+                       dose.dose_level,
+                       dtg.dose_adjusted,
+                       dtg.dose_adjusted_unit,
+                       dtg.mg_kg_day_value,
+                       dtg_effect.*,
+                       obs.*
+                       FROM 
+                       (((((((((prod_toxrefdb_2_1.chemical 
+                       INNER JOIN prod_toxrefdb_2_1.study ON chemical.chemical_id=study.chemical_id)
+                       INNER JOIN prod_toxrefdb_2_1.dose ON dose.study_id=study.study_id)
+                       INNER JOIN prod_toxrefdb_2_1.tg ON tg.study_id=study.study_id)
+                       INNER JOIN prod_toxrefdb_2_1.dtg ON tg.tg_id=dtg.tg_id AND dose.dose_id=dtg.dose_id)
+                       LEFT OUTER JOIN prod_toxrefdb_2_1.tg_effect ON tg.tg_id=tg_effect.tg_id)
+                       LEFT OUTER JOIN prod_toxrefdb_2_1.dtg_effect ON tg_effect.tg_effect_id=dtg_effect.tg_effect_id AND dtg.dtg_id=dtg_effect.dtg_id)
+                       INNER JOIN prod_toxrefdb_2_1.effect ON effect.effect_id=tg_effect.effect_id)
+                       INNER JOIN prod_toxrefdb_2_1.endpoint ON endpoint.endpoint_id=effect.endpoint_id)
+                       INNER JOIN prod_toxrefdb_2_1.obs ON obs.study_id=study.study_id AND obs.endpoint_id=endpoint.endpoint_id)
+                       WHERE study.processed=1;") %>% 
+  data.table() 
+
+save(toxrefv2_1, file='./source/res_toxrefdb_2_1_all_dtg.RData')
+
+```
+
+```{r, warning=FALSE, 'load-data'}
+
+load('./source/res_toxrefdb_2_1_all_dtg.RData')
+
+```
+
+
+# How many studies observe BW change at LOAEL? {.tabset .tabset-fade .tabset-pills}
+
+* First need to look at the critical effect data only (critical_effect=1), i.e. LOAEL values instead of LEL values.
+
+```{r, warning=FALSE}
+
+mgr.dev.ce <- toxrefv2_1[study_type %in% c('MGR', 'DEV') & critical_effect==1]
+
+mgr.dev.list <- mgr.dev.ce[,list(
+  endpoint_target_list = paste0(unique(endpoint_target), collapse=', '), 
+  dose_level = min(dose_level),
+  mg_kg_day_value = min(mg_kg_day_value)
+
+), by=list(dsstox_substance_id, casrn, preferred_name, study_id, study_type, study_year, species, admin_route, endpoint_category, life_stage)]
+
+mgr.dev.list[,study_ce_min := min(mg_kg_day_value, na.rm=TRUE), by=list(study_id)]
+
+length(unique(mgr.dev.list[study_type=='DEV']$study_id)) #842
+length(unique(mgr.dev.list[study_type=='MGR']$study_id)) #332
+
+```
+
+```{r, warning=FALSE}
+
+mgr.dev.list[,min.ce.row := mg_kg_day_value==study_ce_min]
+mgr.dev.list.mins <- mgr.dev.list[min.ce.row==TRUE]
+head(mgr.dev.list.mins)
+
+```
+
+* Here we are looking at all endpoint categories observed at the study's critical effect levels
+* More than one endpoint category is observed per critical effect
+* But, systemic effects are overwhelmingly observed at the critical effect
+
+```{r, warning=FALSE}
+
+
+endpoint_category_counts <- ggplot()+
+  geom_bar(data=mgr.dev.list.mins, aes(y=study_type, fill=endpoint_category))+
+  theme_bw()+
+  annotate(geom='text', x=600, y=2, label='N=332 study_id', size=4, angle=90)+
+  annotate(geom='text', x=1350, y=1, label='N=842 study_id', size=4, angle=90)+
+  theme(legend.title = element_blank(),
+        axis.text = element_text(size=14),
+        #axis.text.x = element_text(angle=75, hjust=1),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.text = element_text(size=12))+
+  scale_fill_viridis(discrete=TRUE, option = 'a')
+
+  
+endpoint_category_counts
+```
+
+
+## Collapse to effects at lowest critical effect level in the study
+
+```{r, warning=FALSE}
+
+mgr.dev.list.mins[, endpoint_categories_at_ce := paste0(endpoint_category, collapse=', '), by=c('study_id')]
+
+#length(unique(mgr.dev.list.mins[grep('systemic',endpoint_categories_at_ce)]$study_id)) #1044
+#length(unique(mgr.dev.list.mins[!grep('systemic',endpoint_categories_at_ce)]$study_id)) #126
+#length(unique(mgr.dev.list.mins$study_id)) #1170
+
+mgr.dev.list.mins[grepl('systemic',endpoint_categories_at_ce), systemic_at_ce := TRUE]
+mgr.dev.list.mins[grepl('reproductive', endpoint_categories_at_ce), repro_dev_at_ce := TRUE]
+mgr.dev.list.mins[grepl('developmental', endpoint_categories_at_ce), repro_dev_at_ce := TRUE]
+mgr.dev.list.mins[grepl('cholinesterase', endpoint_categories_at_ce), cholinesterase_at_ce := TRUE]
+mgr.dev.list.mins[repro_dev_at_ce==TRUE & systemic_at_ce==TRUE, both_at_ce := TRUE]
+mgr.dev.list.mins[is.na(repro_dev_at_ce) & is.na(cholinesterase_at_ce) & systemic_at_ce==TRUE, systemic_only_at_ce := TRUE]
+mgr.dev.list.mins[is.na(repro_dev_at_ce) & is.na(systemic_at_ce) & cholinesterase_at_ce==TRUE, cholinesterase_only_at_ce := TRUE]
+mgr.dev.list.mins[is.na(cholinesterase_at_ce) & is.na(systemic_at_ce), repro_dev_only_at_ce := TRUE]
+mgr.dev.list.mins[is.na(systemic_at_ce) & repro_dev_at_ce ==TRUE & cholinesterase_at_ce==TRUE, repro_dev_chol_at_ce := TRUE]
+
+```
+
+
+* Total DEV and MGR studies = 1170
+* Total DEV and MGR studies with systemic effects at CE level = 1044
+
+```{r, warning=FALSE}
+length(unique(mgr.dev.list.mins$study_id)) #1170
+length(unique(mgr.dev.list.mins[systemic_at_ce==TRUE]$study_id)) #1044
+
+```
+
+## Counts for all DEV and MGR
+
+
+```{r, warning=FALSE}
+
+length(unique(mgr.dev.list.mins[systemic_only_at_ce==TRUE]$study_id)) #703
+length(unique(mgr.dev.list.mins[both_at_ce==TRUE]$study_id)) #332
+length(unique(mgr.dev.list.mins[repro_dev_only_at_ce==TRUE]$study_id)) #94
+length(unique(mgr.dev.list.mins[cholinesterase_only_at_ce==TRUE]$study_id)) #31
+length(unique(mgr.dev.list.mins[repro_dev_chol_at_ce==TRUE]$study_id)) #1
+length(unique(mgr.dev.list.mins[cholinesterase_at_ce==TRUE & systemic_at_ce==TRUE & is.na(repro_dev_at_ce)]$study_id)) #9
+
+
+length(unique(mgr.dev.list.mins[study_type=='DEV']$study_id)) #839
+length(unique(mgr.dev.list.mins[study_type=='DEV' & systemic_at_ce==TRUE]$study_id)) #742
+
+742/839
+```
+
+
+## Counts for DEV
+* 461 studies out of 839 studies (55%) have systemic effects only at CE
+* 276 studies out of 839 studies (33%) have systemic and reprod/dev effects (both) at CE
+* 82 studies out of 839 studies have only repro_dev at the CE (9.8%)
+
+```{r, warning=FALSE}
+
+length(unique(mgr.dev.list.mins[study_type=='DEV' & systemic_only_at_ce==TRUE]$study_id)) #461 DEV studies with only systemic effects at CE
+461/839
+length(unique(mgr.dev.list.mins[study_type=='DEV' & both_at_ce==TRUE]$study_id)) #276
+276/839
+length(unique(mgr.dev.list.mins[study_type=='DEV' & repro_dev_only_at_ce==TRUE]$study_id)) #82
+length(unique(mgr.dev.list.mins[study_type=='DEV' & cholinesterase_only_at_ce==TRUE]$study_id)) #14
+length(unique(mgr.dev.list.mins[study_type=='DEV' & repro_dev_chol_at_ce==TRUE]$study_id)) #1
+length(unique(mgr.dev.list.mins[study_type=='DEV' & cholinesterase_at_ce==TRUE & systemic_at_ce==TRUE & is.na(repro_dev_at_ce)]$study_id)) #5
+
+#461+276+82+14+1+5=839
+
+```
+
+
+## Counts for MGR
+* 242 studies out of 331 studies (73%) have systemic effects only at the CE
+* 56 studies out of 331 studies (17%) have systemic and repro/dev effects (both) at the CE
+* 12 studies out of 331 studies (3.6%) have only repro_dev effects at the CE
+
+```{r, warning=FALSE}
+
+length(unique(mgr.dev.list.mins[study_type=='MGR']$study_id)) #331 total MGR studies
+length(unique(mgr.dev.list.mins[study_type=='MGR' & systemic_at_ce==TRUE]$study_id)) #302
+
+#242+56+12+17+4 = 331
+
+length(unique(mgr.dev.list.mins[study_type=='MGR' & systemic_only_at_ce==TRUE]$study_id)) #242 MGR studies with only systemic effects at CE
+242/331
+length(unique(mgr.dev.list.mins[study_type=='MGR' & both_at_ce==TRUE]$study_id)) #56
+56/331
+
+length(unique(mgr.dev.list.mins[study_type=='MGR' & repro_dev_only_at_ce==TRUE]$study_id)) #12
+12/331
+length(unique(mgr.dev.list.mins[study_type=='MGR' & cholinesterase_only_at_ce==TRUE]$study_id)) #17
+length(unique(mgr.dev.list.mins[study_type=='MGR' & repro_dev_chol_at_ce==TRUE]$study_id)) #0
+length(unique(mgr.dev.list.mins[study_type=='MGR' & cholinesterase_at_ce==TRUE & systemic_at_ce==TRUE & is.na(repro_dev_at_ce)]$study_id)) #4
+
+```
+# Make Figure 1
+
+```{r, warning=FALSE}
+
+DEV <- c(461,276,82,14,1,5)
+MGR <- c(242,56,12,17,0,4)
+CE <- c('systemic only','systemic & reprod/dev', 'repro/dev only','cholinesterase only','repro/dev & cholinesterase', 'systemic & cholinesterase')
+
+data.table(DEV, MGR, CE)
+
+```
+
+
+```{r, warning=FALSE}
+
+ce.summary <- data.table(study_type=rep(c('DEV','MGR'), each=6), ce_type = c('systemic only','systemic & repro/dev', 'repro/dev only','cholinesterase only','repro/dev & cholinesterase', 'systemic & cholinesterase','systemic only','systemic & repro/dev', 'repro/dev only','cholinesterase only','repro/dev & cholinesterase', 'systemic & cholinesterase'),
+                         study_number = c(461,276,82,14,1,5,242,56,12,17,0,4 ))
+
+ce.summary
+```
+
+* Here we are showing just the endpoint categories that informed the minimum critical effect for the study (could be more than one LOAEL by lifestage), and if they are systemic or non-systemic
+* for a vast majority of studies, some systemic effects are observed at the study's minimum critical effect.
+
+```{r, warning=FALSE}
+
+ce_summary <- ggplot(ce.summary, aes(study_type,study_number, fill=ce_type))+
+  geom_col()+
+  theme_bw()+
+  theme(legend.title = element_blank(),
+        axis.text = element_text(size=14),
+        axis.title.x = element_blank(),
+        axis.title.y = element_text(size=16),
+        legend.text = element_text(size=12))+
+  scale_fill_viridis(discrete=TRUE)+
+  labs(y='Unique Studies')
+
+  #annotate(geom='text', x=1, y=860, label='742, 97', size=4)+
+  #annotate(geom='text', x=2, y=350, label='302, 29', size=4)
+
+ce_summary
+
+```
+
+
+```{r, warning=F, eval=F, echo=F}
+# export figure
+
+file.dir <- paste('output/', sep='')
+file.name <- paste('/Fig_endpt_categ_at_ce_', Sys.Date(), '.png', sep='')
+file.path <- paste(file.dir, file.name, sep='')
+dir.create(path=file.dir, showWarnings = FALSE, recursive = TRUE)
+png(file.path, width=6000, height=4000, res=600)
+ce_summary
+dev.off()
+```
+
+# Reproducibility and files
+
+```{r, warning=FALSE}
+
+list_data <- list('mgr_dev_loael_toxrefdb_2_1' = as.data.frame(mgr.dev.ce),
+                  'mgr_dev_CEs' = as.data.frame(mgr.dev.list),
+                  'mgr_dev_CE_mins_only' = as.data.frame(mgr.dev.list.mins),
+                  'ce_summary_graph' = as.data.frame(ce.summary))
+                    
+
+
+write.xlsx(list_data, file='./output/draft_data_toxrefdb_v2_1_mgr_dev_systemic_analysis_15Aug2023.xlsx')
+
+```
+
+
+```{r, warning=FALSE}
+print(sessionInfo())
+
+
+```
