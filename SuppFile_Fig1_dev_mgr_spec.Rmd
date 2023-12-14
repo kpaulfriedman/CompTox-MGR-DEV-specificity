@@ -64,7 +64,7 @@ con <- dbConnect(drv = RMySQL::MySQL(),
 # not shown in knit but available for .Rmd internal users
 con <- dbConnect(drv = RMySQL::MySQL(),
                  database=prod_toxrefdb_2_1, # internal research MySQL database naming currently
-                 user="_dataminer", password="pass",host="ccte-mysql-res.epa.gov") # user connection details omitted
+                 user="", password="",host="") # user connection details omitted
 ```
 
 ```{r, warning=FALSE, eval=FALSE, 'db-query'}
